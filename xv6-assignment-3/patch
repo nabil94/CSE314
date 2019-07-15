@@ -1,0 +1,852 @@
+commit ae59b197691552c0ad47e81383c3284a8f132754
+Author: Nabil <raianlatif1151041@gmail.com>
+Date:   Wed Feb 13 03:44:05 2019 +0600
+
+    last one
+
+diff --git a/patch_xv6_paging_1505094_1505109 b/patch_xv6_paging_1505094_1505109
+new file mode 100644
+index 0000000..6202bfc
+--- /dev/null
++++ b/patch_xv6_paging_1505094_1505109
+@@ -0,0 +1,712 @@
++commit 7ca133bd3c574dcacbc9f3fec8cb4de8398f1d01
++Author: Nabil <raianlatif1151041@gmail.com>
++Date:   Sun Feb 10 20:47:34 2019 +0600
++
++    Hello world
++
++diff --git a/Makefile b/Makefile
++index 09d790c..fbd124c 100644
++--- a/Makefile
+++++ b/Makefile
++@@ -181,6 +181,7 @@ UPROGS=\
++ 	_usertests\
++ 	_wc\
++ 	_zombie\
+++	_nabil\
++ 
++ fs.img: mkfs README $(UPROGS)
++ 	./mkfs fs.img README $(UPROGS)
++@@ -249,7 +250,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
++ 
++ EXTRA=\
++ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
++-	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+++	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c nabil.c\
++ 	printf.c umalloc.c\
++ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
++ 	.gdbinit.tmpl gdbutil\
++diff --git a/defs.h b/defs.h
++index 82fb982..9e2525f 100644
++--- a/defs.h
+++++ b/defs.h
++@@ -52,6 +52,11 @@ struct inode*   nameiparent(char*, char*);
++ int             readi(struct inode*, char*, uint, uint);
++ void            stati(struct inode*, struct stat*);
++ int             writei(struct inode*, char*, uint, uint);
+++int             createSwapFile(struct proc* p);
+++int             readFromSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size);
+++int             writeToSwapFile(struct proc* p, char* buffer, uint placeOnFile, uint size);
+++int             removeSwapFile(struct proc* p);
+++
++ 
++ // ide.c
++ void            ideinit(void);
++@@ -124,6 +129,11 @@ void            yield(void);
++ // swtch.S
++ void            swtch(struct context**, struct context*);
++ 
+++// sysfile
+++struct inode*   create(char *path, short type, short major, short minor);
+++int             isdirempty(struct inode *dp);
+++
+++
++ // spinlock.c
++ void            acquire(struct spinlock*);
++ void            getcallerpcs(void*, uint*);
++@@ -185,6 +195,7 @@ void            switchuvm(struct proc*);
++ void            switchkvm(void);
++ int             copyout(pde_t*, uint, void*, uint);
++ void            clearpteu(pde_t *pgdir, char *uva);
+++void            swapPages(uint);
++ 
++ // number of elements in fixed-size array
++ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
++diff --git a/exec.c b/exec.c
++index b40134f..bff03a6 100644
++--- a/exec.c
+++++ b/exec.c
++@@ -99,6 +99,7 @@ exec(char *path, char **argv)
++   curproc->sz = sz;
++   curproc->tf->eip = elf.entry;  // main
++   curproc->tf->esp = sp;
+++  createSwapFile(curproc);
++   switchuvm(curproc);
++   freevm(oldpgdir);
++   return 0;
++diff --git a/fs.c b/fs.c
++index feb59fe..f7c92cf 100644
++--- a/fs.c
+++++ b/fs.c
++@@ -669,3 +669,144 @@ nameiparent(char *path, char *name)
++ {
++   return namex(path, 1, name);
++ }
+++
+++// NEW FOR PAGING
+++
+++#include "fcntl.h"
+++#define DIGITS 14
+++
+++char* itoa(int i, char b[]){
+++    char const digit[] = "0123456789";
+++    char* p = b;
+++    if(i<0){
+++        *p++ = '-';
+++        i *= -1;
+++    }
+++    int shifter = i;
+++    do{ //Move to where representation ends
+++        ++p;
+++        shifter = shifter/10;
+++    }while(shifter);
+++    *p = '\0';
+++    do{ //Move back, inserting digits as u go
+++        *--p = digit[i%10];
+++        i = i/10;
+++    }while(i);
+++    return b;
+++}
+++
+++//remove swap file of proc p;
+++int
+++removeSwapFile(struct proc* p)
+++{
+++	//path of proccess
+++	char path[DIGITS];
+++	memmove(path,"/.swap", 6);
+++	itoa(p->pid, path+ 6);
+++
+++	struct inode *ip, *dp;
+++	struct dirent de;
+++	char name[DIRSIZ];
+++	uint off;
+++
+++	if(0 == p->swapFile)
+++	{
+++		return -1;
+++	}
+++	fileclose(p->swapFile);
+++
+++	begin_op();
+++	if((dp = nameiparent(path, name)) == 0)
+++	{
+++		end_op();
+++		return -1;
+++	}
+++
+++	ilock(dp);
+++
+++	  // Cannot unlink "." or "..".
+++	if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
+++	   goto bad;
+++
+++	if((ip = dirlookup(dp, name, &off)) == 0)
+++		goto bad;
+++	ilock(ip);
+++
+++	if(ip->nlink < 1)
+++		panic("unlink: nlink < 1");
+++	if(ip->type == T_DIR && !isdirempty(ip)){
+++		iunlockput(ip);
+++		goto bad;
+++	}
+++
+++	memset(&de, 0, sizeof(de));
+++	if(writei(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
+++		panic("unlink: writei");
+++	if(ip->type == T_DIR){
+++		dp->nlink--;
+++		iupdate(dp);
+++	}
+++	iunlockput(dp);
+++
+++	ip->nlink--;
+++	iupdate(ip);
+++	iunlockput(ip);
+++
+++	end_op();
+++
+++	return 0;
+++
+++	bad:
+++		iunlockput(dp);
+++		end_op();
+++		return -1;
+++
+++}
+++
+++
+++//return 0 on success
+++int
+++createSwapFile(struct proc* p)
+++{
+++
+++	char path[DIGITS];
+++	memmove(path,"/.swap", 6);
+++	itoa(p->pid, path+ 6);
+++
+++    begin_op();
+++    struct inode * in = create(path, T_FILE, 0, 0);
+++	iunlock(in);
+++
+++	p->swapFile = filealloc();
+++	if (p->swapFile == 0)
+++		panic("no slot for files on /store");
+++
+++	p->swapFile->ip = in;
+++	p->swapFile->type = FD_INODE;
+++	p->swapFile->off = 0;
+++	p->swapFile->readable = O_WRONLY;
+++	p->swapFile->writable = O_RDWR;
+++    end_op();
+++
+++    return 0;
+++}
+++
+++//return as sys_write (-1 when error)
+++int
+++writeToSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size)
+++{
+++	p->swapFile->off = placeOnFile;
+++
+++	return filewrite(p->swapFile, buffer, size);
+++
+++}
+++
+++//return as sys_read (-1 when error)
+++int
+++readFromSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size)
+++{
+++	p->swapFile->off = placeOnFile;
+++
+++	return fileread(p->swapFile, buffer,  size);
+++}
+++
++diff --git a/mmu.h b/mmu.h
++index a82d8e2..aec4420 100644
++--- a/mmu.h
+++++ b/mmu.h
++@@ -95,6 +95,8 @@ struct segdesc {
++ #define PTE_W           0x002   // Writeable
++ #define PTE_U           0x004   // User
++ #define PTE_PS          0x080   // Page Size
+++#define PTE_A           0x020   // Accessed
+++#define PTE_PG          0x200   // Paged out to secondary storage
++ 
++ // Address in page table or page directory entry
++ #define PTE_ADDR(pte)   ((uint)(pte) & ~0xFFF)
++diff --git a/nabil.c b/nabil.c
++new file mode 100644
++index 0000000..8850394
++--- /dev/null
+++++ b/nabil.c
++@@ -0,0 +1,17 @@
+++#include "types.h"
+++#include "user.h"
+++
+++#define PGSIZE 4096
+++
+++int 
+++main(int argv,char *argc[])
+++{
+++	int i;
+++	//char *arr[14];
+++	for(i = 0; i < 20;i++){
+++		//arr[i] = sbrk(PGSIZE);
+++		printf(1,"page no %d, address 0x%x\n",i,sbrk(PGSIZE));
+++	}
+++	printf(1,"Done\n");
+++	exit();
+++}
++\ No newline at end of file
++diff --git a/paging.patch b/paging.patch
++new file mode 100644
++index 0000000..54ef2b9
++--- /dev/null
+++++ b/paging.patch
++@@ -0,0 +1,225 @@
+++diff --git a/defs.h b/defs.h
+++index 82fb982..f33f2cb 100644
+++--- a/defs.h
++++++ b/defs.h
+++@@ -52,6 +52,11 @@ struct inode*   nameiparent(char*, char*);
+++ int             readi(struct inode*, char*, uint, uint);
+++ void            stati(struct inode*, struct stat*);
+++ int             writei(struct inode*, char*, uint, uint);
++++int             createSwapFile(struct proc* p);
++++int             readFromSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size);
++++int             writeToSwapFile(struct proc* p, char* buffer, uint placeOnFile, uint size);
++++int             removeSwapFile(struct proc* p);
++++
+++ 
+++ // ide.c
+++ void            ideinit(void);
+++@@ -124,6 +129,11 @@ void            yield(void);
+++ // swtch.S
+++ void            swtch(struct context**, struct context*);
+++ 
++++// sysfile
++++struct inode*   create(char *path, short type, short major, short minor);
++++int             isdirempty(struct inode *dp);
++++
++++
+++ // spinlock.c
+++ void            acquire(struct spinlock*);
+++ void            getcallerpcs(void*, uint*);
+++diff --git a/fs.c b/fs.c
+++index feb59fe..f7c92cf 100644
+++--- a/fs.c
++++++ b/fs.c
+++@@ -669,3 +669,144 @@ nameiparent(char *path, char *name)
+++ {
+++   return namex(path, 1, name);
+++ }
++++
++++// NEW FOR PAGING
++++
++++#include "fcntl.h"
++++#define DIGITS 14
++++
++++char* itoa(int i, char b[]){
++++    char const digit[] = "0123456789";
++++    char* p = b;
++++    if(i<0){
++++        *p++ = '-';
++++        i *= -1;
++++    }
++++    int shifter = i;
++++    do{ //Move to where representation ends
++++        ++p;
++++        shifter = shifter/10;
++++    }while(shifter);
++++    *p = '\0';
++++    do{ //Move back, inserting digits as u go
++++        *--p = digit[i%10];
++++        i = i/10;
++++    }while(i);
++++    return b;
++++}
++++
++++//remove swap file of proc p;
++++int
++++removeSwapFile(struct proc* p)
++++{
++++	//path of proccess
++++	char path[DIGITS];
++++	memmove(path,"/.swap", 6);
++++	itoa(p->pid, path+ 6);
++++
++++	struct inode *ip, *dp;
++++	struct dirent de;
++++	char name[DIRSIZ];
++++	uint off;
++++
++++	if(0 == p->swapFile)
++++	{
++++		return -1;
++++	}
++++	fileclose(p->swapFile);
++++
++++	begin_op();
++++	if((dp = nameiparent(path, name)) == 0)
++++	{
++++		end_op();
++++		return -1;
++++	}
++++
++++	ilock(dp);
++++
++++	  // Cannot unlink "." or "..".
++++	if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
++++	   goto bad;
++++
++++	if((ip = dirlookup(dp, name, &off)) == 0)
++++		goto bad;
++++	ilock(ip);
++++
++++	if(ip->nlink < 1)
++++		panic("unlink: nlink < 1");
++++	if(ip->type == T_DIR && !isdirempty(ip)){
++++		iunlockput(ip);
++++		goto bad;
++++	}
++++
++++	memset(&de, 0, sizeof(de));
++++	if(writei(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
++++		panic("unlink: writei");
++++	if(ip->type == T_DIR){
++++		dp->nlink--;
++++		iupdate(dp);
++++	}
++++	iunlockput(dp);
++++
++++	ip->nlink--;
++++	iupdate(ip);
++++	iunlockput(ip);
++++
++++	end_op();
++++
++++	return 0;
++++
++++	bad:
++++		iunlockput(dp);
++++		end_op();
++++		return -1;
++++
++++}
++++
++++
++++//return 0 on success
++++int
++++createSwapFile(struct proc* p)
++++{
++++
++++	char path[DIGITS];
++++	memmove(path,"/.swap", 6);
++++	itoa(p->pid, path+ 6);
++++
++++    begin_op();
++++    struct inode * in = create(path, T_FILE, 0, 0);
++++	iunlock(in);
++++
++++	p->swapFile = filealloc();
++++	if (p->swapFile == 0)
++++		panic("no slot for files on /store");
++++
++++	p->swapFile->ip = in;
++++	p->swapFile->type = FD_INODE;
++++	p->swapFile->off = 0;
++++	p->swapFile->readable = O_WRONLY;
++++	p->swapFile->writable = O_RDWR;
++++    end_op();
++++
++++    return 0;
++++}
++++
++++//return as sys_write (-1 when error)
++++int
++++writeToSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size)
++++{
++++	p->swapFile->off = placeOnFile;
++++
++++	return filewrite(p->swapFile, buffer, size);
++++
++++}
++++
++++//return as sys_read (-1 when error)
++++int
++++readFromSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size)
++++{
++++	p->swapFile->off = placeOnFile;
++++
++++	return fileread(p->swapFile, buffer,  size);
++++}
++++
+++diff --git a/mmu.h b/mmu.h
+++index a82d8e2..aec4420 100644
+++--- a/mmu.h
++++++ b/mmu.h
+++@@ -95,6 +95,8 @@ struct segdesc {
+++ #define PTE_W           0x002   // Writeable
+++ #define PTE_U           0x004   // User
+++ #define PTE_PS          0x080   // Page Size
++++#define PTE_A           0x020   // Accessed
++++#define PTE_PG          0x200   // Paged out to secondary storage
+++ 
+++ // Address in page table or page directory entry
+++ #define PTE_ADDR(pte)   ((uint)(pte) & ~0xFFF)
+++diff --git a/proc.h b/proc.h
+++index 1647114..9f65fae 100644
+++--- a/proc.h
++++++ b/proc.h
+++@@ -49,6 +49,8 @@ struct proc {
+++   struct file *ofile[NOFILE];  // Open files
+++   struct inode *cwd;           // Current directory
+++   char name[16];               // Process name (debugging)
++++  //Swap file. must initiate with create swap file
++++  struct file *swapFile;			//page file
+++ };
+++ 
+++ // Process memory is laid out contiguously, low addresses first:
+++diff --git a/sysfile.c b/sysfile.c
+++index 87e508b..22d3588 100644
+++--- a/sysfile.c
++++++ b/sysfile.c
+++@@ -165,7 +165,7 @@ bad:
+++ }
+++ 
+++ // Is the directory dp empty except for "." and ".." ?
+++-static int
++++int
+++ isdirempty(struct inode *dp)
+++ {
+++   int off;
+++@@ -238,7 +238,7 @@ bad:
+++   return -1;
+++ }
+++ 
+++-static struct inode*
++++struct inode*
+++ create(char *path, short type, short major, short minor)
+++ {
+++   uint off;
++diff --git a/proc.c b/proc.c
++index 806b1b1..ada7a54 100644
++--- a/proc.c
+++++ b/proc.c
++@@ -75,6 +75,7 @@ allocproc(void)
++ {
++   struct proc *p;
++   char *sp;
+++  int i;
++ 
++   acquire(&ptable.lock);
++ 
++@@ -112,6 +113,17 @@ found:
++   memset(p->context, 0, sizeof *p->context);
++   p->context->eip = (uint)forkret;
++ 
+++  for(i = 0; i < MAX_PSYNC_PAGES;i++){
+++    p->pages[i].virtualAddress = (char*)0x0000;
+++    p->pages[i].prev = 0;
+++    p->pages[i].next = 0;
+++  }
+++  p->head = 0;
+++  p->tail = 0;
+++  p->numOfPages = 0;
+++  p->numOfSwappedPages = 0;
+++  p->numOfPageFaults = 0;
+++
++   return p;
++ }
++ 
++@@ -211,6 +223,7 @@ fork(void)
++   safestrcpy(np->name, curproc->name, sizeof(curproc->name));
++ 
++   pid = np->pid;
+++  //createSwapFile(curproc);
++ 
++   acquire(&ptable.lock);
++ 
++diff --git a/proc.h b/proc.h
++index 1647114..16fa9c2 100644
++--- a/proc.h
+++++ b/proc.h
++@@ -1,4 +1,5 @@
++ // Per-CPU state
+++#define MAX_PSYNC_PAGES 15
++ struct cpu {
++   uchar apicid;                // Local APIC ID
++   struct context *scheduler;   // swtch() here to enter scheduler
++@@ -34,6 +35,12 @@ struct context {
++ 
++ enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
++ 
+++struct page{
+++  char *virtualAddress;
+++  struct page *prev;
+++  struct page *next;
+++};
+++
++ // Per-process state
++ struct proc {
++   uint sz;                     // Size of process memory (bytes)
++@@ -49,6 +56,16 @@ struct proc {
++   struct file *ofile[NOFILE];  // Open files
++   struct inode *cwd;           // Current directory
++   char name[16];               // Process name (debugging)
+++  //Swap file. must initiate with create swap file
+++  struct file *swapFile;			//page file
+++  struct page pages[MAX_PSYNC_PAGES];
+++  struct page *head;
+++  struct page *tail;
+++  struct page *dup; 
+++  int numOfPages;
+++  int numOfSwappedPages;
+++  int numOfPageFaults;
+++
++ };
++ 
++ // Process memory is laid out contiguously, low addresses first:
++diff --git a/sysfile.c b/sysfile.c
++index 87e508b..22d3588 100644
++--- a/sysfile.c
+++++ b/sysfile.c
++@@ -165,7 +165,7 @@ bad:
++ }
++ 
++ // Is the directory dp empty except for "." and ".." ?
++-static int
+++int
++ isdirempty(struct inode *dp)
++ {
++   int off;
++@@ -238,7 +238,7 @@ bad:
++   return -1;
++ }
++ 
++-static struct inode*
+++struct inode*
++ create(char *path, short type, short major, short minor)
++ {
++   uint off;
++diff --git a/trap.c b/trap.c
++index 41c66eb..0efac38 100644
++--- a/trap.c
+++++ b/trap.c
++@@ -36,6 +36,8 @@ idtinit(void)
++ void
++ trap(struct trapframe *tf)
++ {
+++  uint addr;
+++  pde_t *vaddr;
++   if(tf->trapno == T_SYSCALL){
++     if(myproc()->killed)
++       exit();
++@@ -78,7 +80,18 @@ trap(struct trapframe *tf)
++     lapiceoi();
++     break;
++ 
++-  //PAGEBREAK: 13
+++  case T_PGFLT:
+++    cprintf("page fault occured\n");
+++    //return;
+++    addr = rcr2();
+++    vaddr = &myproc()->pgdir[PDX(addr)];
+++    if (((int)(*vaddr) & PTE_P) != 0) { 
+++      if (((uint*)PTE_ADDR(P2V(*vaddr)))[PTX(addr)] & PTE_PG) { 
+++        swapPages(PTE_ADDR(addr));
+++        myproc()->numOfPageFaults++;
+++        return;
+++      }
+++    }
++   default:
++     if(myproc() == 0 || (tf->cs&3) == 0){
++       // In kernel, it must be our mistake.
++diff --git a/vm.c b/vm.c
++index 7134cff..6f33727 100644
++--- a/vm.c
+++++ b/vm.c
++@@ -221,9 +221,10 @@ loaduvm(pde_t *pgdir, char *addr, struct inode *ip, uint offset, uint sz)
++ int
++ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
++ {
+++  //pte_t *pte;
++   char *mem;
++   uint a;
++-
+++  struct proc *myProcess = myproc();
++   if(newsz >= KERNBASE)
++     return 0;
++   if(newsz < oldsz)
++@@ -244,6 +245,52 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
++       kfree(mem);
++       return 0;
++     }
+++
+++    if(myProcess->numOfPages == 0){
+++      struct page *newpage = myProcess->head;
+++      newpage->virtualAddress = (char*)a;
+++      newpage->next = 0;
+++      myProcess->tail = newpage;
+++      
+++      //cprintf("page with virtual addr %d\n",a);
+++    }
+++    else if(myProcess->numOfPages > MAX_PSYNC_PAGES){
+++      struct page *newpage;
+++      /*if(pp = writePageToSwapFile((char*)a) == 0){
+++        cprintf("Error in writing to swap file");
+++      }*/
+++      newpage = myProcess->dup;
+++      newpage->virtualAddress = (char*)a;
+++      //a = a + PGSIZE;
+++      newpage->next = 0;
+++      myProcess->tail->next = newpage;
+++      myProcess->head = myProcess->head->next;
+++      myProcess->head->prev = 0;
+++      writeToSwapFile(myProcess, newpage->virtualAddress, myProcess->numOfSwappedPages*PGSIZE,PGSIZE);
+++      ++myProcess->numOfSwappedPages;
+++      //struct page *swappedPage = newPage;
+++      cprintf("After Writing swap files\n");
+++      //pgdir = pgdir & ~0x001;
+++      int jj = a & ~(1<<PTE_P);
+++      newpage->virtualAddress = (char*)jj;
+++
+++
+++    }
+++    else{
+++      struct page *newPage = myProcess->dup;
+++      newPage->virtualAddress = (char*)a;
+++      //a = a + PGSIZE;
+++      newPage->next = 0;
+++      newPage->prev = myProcess->tail;
+++      myProcess->tail->next = newPage;
+++
+++      
+++      //cprintf("page with virtual addr %d\n",a);
+++    }
+++
+++    ++myProcess->numOfPages;
+++    //cprintf("Total pages %d\n",myProcess->numOfPages);
+++    cprintf("Total Swappedpages %d\n",myProcess->numOfSwappedPages);
++   }
++   return newsz;
++ }
++@@ -385,6 +432,17 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
++   return 0;
++ }
++ 
+++void swapPages(uint addr)
+++{
+++  struct proc *p = myproc();
+++  if (strncmp(p->name, "init",sizeof(p->name)) == 0 || strncmp(p->name, "sh",sizeof(p->name)) == 0) {
+++    p->numOfPages++;
+++    return;
+++  }
+++
+++
+++}
+++
++ //PAGEBREAK!
++ // Blank page.
++ //PAGEBREAK!
+diff --git a/proc.h b/proc.h
+index 16fa9c2..0d4da65 100644
+--- a/proc.h
++++ b/proc.h
+@@ -35,6 +35,11 @@ struct context {
+ 
+ enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+ 
++struct swappedPage{
++  char *virtualAddress;
++  uint newLoc;
++};
++
+ struct page{
+   char *virtualAddress;
+   struct page *prev;
+@@ -57,13 +62,14 @@ struct proc {
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
+   //Swap file. must initiate with create swap file
++  int numOfSwappedPages;
+   struct file *swapFile;			//page file
+   struct page pages[MAX_PSYNC_PAGES];
++  struct swappedPage swappedpages[MAX_PSYNC_PAGES];
+   struct page *head;
+   struct page *tail;
+   struct page *dup; 
+   int numOfPages;
+-  int numOfSwappedPages;
+   int numOfPageFaults;
+ 
+ };
+diff --git a/vm.c b/vm.c
+index 6f33727..6410968 100644
+--- a/vm.c
++++ b/vm.c
+@@ -7,6 +7,8 @@
+ #include "proc.h"
+ #include "elf.h"
+ 
++#define BUF_SIZE 128
++
+ extern char data[];  // defined by kernel.ld
+ pde_t *kpgdir;  // for use in scheduler()
+ 
+@@ -271,8 +273,10 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+       //struct page *swappedPage = newPage;
+       cprintf("After Writing swap files\n");
+       //pgdir = pgdir & ~0x001;
+-      int jj = a & ~(1<<PTE_P);
+-      newpage->virtualAddress = (char*)jj;
++      /*pde = &pgdir[PDX(newpage->virtualAddress)];
++  	  if(*pde & PTE_P){
++    	pgtab = (pte_t*)P2V(PTE_ADDR(*pde));
++  	  }*/
+ 
+ 
+     }
+@@ -434,11 +438,69 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
+ 
+ void swapPages(uint addr)
+ {
++	int i, j;
++  char buf[BUF_SIZE];
++  pte_t *pte1, *pte2;
+   struct proc *p = myproc();
+   if (strncmp(p->name, "init",sizeof(p->name)) == 0 || strncmp(p->name, "sh",sizeof(p->name)) == 0) {
+     p->numOfPages++;
+     return;
+   }
++  int DEBUG = 1;
++
++  
++
++  struct page *link =p->head;
++  struct page *l;
++  if (link == 0)
++    panic("fifoSwap: proc->head is NULL");
++  if (link->next == 0)
++    panic("fifoSwap: single page in phys mem");
++  // find the before-last link in the used pages list
++  while (link->next->next != 0)
++    link = link->next;
++  l = link->next;
++  link->next = 0;
++
++  if(DEBUG){
++    //cprintf("\naddress between 0x%x and 0x%x was accessed but was on disk.\n", addr, addr+PGSIZE);
++    cprintf("FIFO chose to page out page starting at 0x%x \n\n", l->virtualAddress);
++  }
++
++  //find the address of the page table entry to copy into the swap file
++  pte1 = walkpgdir(p->pgdir, (void*)l->virtualAddress, 0);
++  if (!*pte1)
++    panic("swapFile: FIFO pte1 is empty");
++  //find a swap file page descriptor slot
++  for (i = 0; i < MAX_PSYNC_PAGES; i++)
++    if (p->swappedpages[i].virtualAddress == (char*)PTE_ADDR(addr))
++      goto foundswap;
++  panic("swappages");
++foundswap:
++
++  //update relevant fields in proc
++  // proc->swappedpages[i].va = (char*)P2V_WO(PTE_ADDR(*pte1)); // WRONG!!!
++  p->swappedpages[i].virtualAddress = l->virtualAddress;
++  //assign the physical page to addr in the relevant page table
++  pte2 = walkpgdir(p->pgdir, (void*)addr, 0);
++  if (!*pte2)
++    panic("swapFile: FIFO pte2 is empty");
++  //set page table entry
++  *pte2 = PTE_ADDR(*pte1) | PTE_U | PTE_W | PTE_P;
++  for (j = 0; j < 4; j++) {
++    int loc = (i * PGSIZE) + ((PGSIZE / 4) * j);
++    int addroffset = ((PGSIZE / 4) * j);
++    memset(buf, 0, BUF_SIZE);
++    readFromSwapFile(p, buf, loc, BUF_SIZE);
++    writeToSwapFile(p, (char*)(P2V_WO(PTE_ADDR(*pte1)) + addroffset), loc, BUF_SIZE);
++    memmove((void*)(PTE_ADDR(addr) + addroffset), (void*)buf, BUF_SIZE);
++  }
++  //update the page table entry flags, reset the physical page address
++  *pte1 = PTE_U | PTE_W | PTE_PG;
++  //update l to hold the new va
++  l->next = p->head;
++  p->head = l;
++  l->virtualAddress = (char*)PTE_ADDR(addr);
+ 
+ 
+ }
